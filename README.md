@@ -17,15 +17,15 @@ It wasn't. This tool was built to find out what the real story is.
 - [Hardware](#hardware)
 - [What Was Built](#what-was-built)
 - [The Journey](#the-journey)
-  - [Stage 1 — Idle Baseline: characterizing the noise floor](#stage-1--idle-baseline--characterizing-the-noise-floor)
-  - [Stage 2 — Single-GPU Inference: establishing the wake signal](#stage-2--single-gpu-inference--establishing-the-wake-signal)
-  - [Stage 3 — Per-Card Baselines: proving both GPUs work](#stage-3--per-card-baselines--proving-both-gpus-work)
-  - [Stage 4 — Concurrent Dual-Card: new failure mode discovered](#stage-4--concurrent-dual-card--new-failure-mode-discovered)
-  - [Stage 5 — Dual-Card Layer Split, MoE: the milestone](#stage-5--dual-card-layer-split-moe--the-milestone)
-  - [Stage 6 — Dual-Card Layer Split, Dense: MoE vs dense comparison](#stage-6--dual-card-layer-split-dense--moe-vs-dense-comparison)
+  - [Stage 1: Idle Baseline](#stage-1-idle-baseline)
+  - [Stage 2: Single-GPU Inference](#stage-2-single-gpu-inference)
+  - [Stage 3: Per-Card Baselines](#stage-3-per-card-baselines)
+  - [Stage 4: Concurrent Dual-Card](#stage-4-concurrent-dual-card)
+  - [Stage 5: Dual-Card Layer Split (MoE)](#stage-5-dual-card-layer-split-moe)
+  - [Stage 6: Dual-Card Layer Split (Dense)](#stage-6-dual-card-layer-split-dense)
 - [Performance Reference](#performance-reference)
 - [Known Rig-Specific Issues](#known-rig-specific-issues)
-- [Status & What's Next](#status--whats-next)
+- [Status and Whats Next](#status-and-whats-next)
 - [Repo Layout](#repo-layout)
 
 ---
@@ -160,7 +160,9 @@ everything material, with re-run commands so any experiment can be reproduced.
 
 ---
 
-### Stage 1 — Idle Baseline: characterizing the noise floor
+### Stage 1: Idle Baseline
+
+*Characterizing the noise floor.*
 
 **Findings:** [`docs/baseline-findings-idle.md`](docs/baseline-findings-idle.md)
 
@@ -184,7 +186,9 @@ every subsequent experiment.
 
 ---
 
-### Stage 2 — Single-GPU Inference: establishing the wake signal
+### Stage 2: Single-GPU Inference
+
+*Establishing the wake signal.*
 
 **Findings:** [`docs/findings-single-gpu-mistral24b-1.md`](docs/findings-single-gpu-mistral24b-1.md)
 
@@ -215,7 +219,9 @@ Vulkan budget are per-process; our observer process sees only its own 4 KiB allo
 
 ---
 
-### Stage 3 — Per-Card Baselines: proving both GPUs work
+### Stage 3: Per-Card Baselines
+
+*Proving both GPUs work.*
 
 **Findings:** [`docs/findings-single-gpu-both-baselines.md`](docs/findings-single-gpu-both-baselines.md)
 
@@ -247,7 +253,9 @@ not. The per-field credibility model held.
 
 ---
 
-### Stage 4 — Concurrent Dual-Card: new failure mode discovered
+### Stage 4: Concurrent Dual-Card
+
+*New failure mode discovered.*
 
 **Findings:** [`docs/findings-both-cards-concurrent-mistral24b-1.md`](docs/findings-both-cards-concurrent-mistral24b-1.md)
 
@@ -282,7 +290,9 @@ contention — caught honestly by the [library audit](src/runtime/library_audit.
 
 ---
 
-### Stage 5 — Dual-Card Layer Split, MoE: the milestone
+### Stage 5: Dual-Card Layer Split (MoE)
+
+*The milestone.*
 
 **Findings:** [`docs/findings-dual-b70-qwen30b-moe-1.md`](docs/findings-dual-b70-qwen30b-moe-1.md)
 
@@ -316,7 +326,9 @@ airflow and halved per-card load.
 
 ---
 
-### Stage 6 — Dual-Card Layer Split, Dense: MoE vs dense comparison
+### Stage 6: Dual-Card Layer Split (Dense)
+
+*MoE vs dense comparison.*
 
 **Findings:** [`docs/findings-dual-b70-qwen25-32b-q4-1.md`](docs/findings-dual-b70-qwen25-32b-q4-1.md)
 
@@ -386,7 +398,7 @@ Memory` collector is the fix.
 
 ---
 
-## Status & What's Next
+## Status and Whats Next
 
 **v1 is complete.** All planned experiments have been run. The noise floor is
 characterized, the do-no-harm budget held across every run, and the architecture is stable.
