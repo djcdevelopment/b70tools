@@ -1,0 +1,14 @@
+build/
+out/
+runs/
+eval/runs/
+eval/snapshots/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.idb
+.vs/
+.vscode/
+.claude/
+CMakeUserPresets.json
