@@ -10,6 +10,78 @@ It wasn't. This tool was built to find out what the real story is.
 
 ---
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [The Problem](#the-problem)
+- [Hardware](#hardware)
+- [What Was Built](#what-was-built)
+- [The Journey](#the-journey)
+  - [Stage 1 — Idle Baseline: characterizing the noise floor](#stage-1--idle-baseline--characterizing-the-noise-floor)
+  - [Stage 2 — Single-GPU Inference: establishing the wake signal](#stage-2--single-gpu-inference--establishing-the-wake-signal)
+  - [Stage 3 — Per-Card Baselines: proving both GPUs work](#stage-3--per-card-baselines--proving-both-gpus-work)
+  - [Stage 4 — Concurrent Dual-Card: new failure mode discovered](#stage-4--concurrent-dual-card--new-failure-mode-discovered)
+  - [Stage 5 — Dual-Card Layer Split, MoE: the milestone](#stage-5--dual-card-layer-split-moe--the-milestone)
+  - [Stage 6 — Dual-Card Layer Split, Dense: MoE vs dense comparison](#stage-6--dual-card-layer-split-dense--moe-vs-dense-comparison)
+- [Performance Reference](#performance-reference)
+- [Known Rig-Specific Issues](#known-rig-specific-issues)
+- [Status & What's Next](#status--whats-next)
+- [Repo Layout](#repo-layout)
+
+---
+
+## Quick Start
+
+**Prerequisites:** Visual Studio 2022 Community with the "Desktop development with C++"
+workload. That's it — no other tools required.
+
+```powershell
+git clone https://github.com/djcdevelopment/b70tools.git
+cd b70tools
+.\build.ps1                  # locates MSVC, runs CMake + Ninja → build\b70tools.exe
+```
+
+Verify both cards are recognized:
+```powershell
+.\build\b70tools.exe --enumerate --out .\runs\preflight
+.\build\b70tools.exe summarize .\runs\preflight
+```
+
+Capture a 5-minute idle baseline:
+```powershell
+.\build\b70tools.exe run --ticks 300 --out .\runs\baseline-idle-1
+.\build\b70tools.exe adapters      .\runs\baseline-idle-1
+.\build\b70tools.exe disagreements .\runs\baseline-idle-1
+.\build\b70tools.exe self          .\runs\baseline-idle-1
+```
+
+Capture telemetry during a dual-card inference run (start b70tools **first**, then
+launch your workload 12–15 s later):
+```powershell
+# Terminal 1 — 10-minute telemetry window:
+.\build\b70tools.exe run --ticks 600 --out .\runs\dual-b70-1
+
+# Terminal 2 — after ~12 s, start inference:
+$env:GGML_VK_VISIBLE_DEVICES  = '0,1'
+$env:GGML_VK_DISABLE_COOPMAT  = '1'
+llama-cli.exe -m <model.gguf> -ngl 99 -sm layer -ts 1,1 -fit off --no-mmap -dio -c 4096 -n 2000 -p "<prompt>"
+```
+
+Analyze after:
+```powershell
+.\build\b70tools.exe adapters      .\runs\dual-b70-1   # ← start here; both cards' thermals tell the story
+.\build\b70tools.exe summarize     .\runs\dual-b70-1
+.\build\b70tools.exe disagreements .\runs\dual-b70-1
+.\build\b70tools.exe self          .\runs\dual-b70-1
+.\build\b70tools.exe verdict       .\runs\dual-b70-1
+```
+
+New to the hardware? The full setup guide is at
+[`docs/runbook-fresh-b70-pc.md`](docs/runbook-fresh-b70-pc.md) — driver install, llama.cpp
+Vulkan setup, thermal management tips, and a complete experiment walkthrough.
+
+---
+
 ## The Problem
 
 Running large Vulkan inference workloads across two Arc Pro B70s on Windows produces
@@ -54,13 +126,16 @@ A single Windows executable (`b70tools.exe`, ~490 KB, zero DLL dependencies) wit
 operating modes:
 
 **Capture** — runs a poll loop at 1 Hz, collecting from four passive sources:
-- D3DKMT kernel-mode adapter perf counters
-- DXGI VideoMemoryInfo (per-process heap budgets)
-- Vulkan VK_EXT_memory_budget
-- IGCL (Intel GPU Command List) power/thermal/clock telemetry
+- D3DKMT kernel-mode adapter perf counters ([`src/collectors/d3dkmt_adapter_perfdata.cc`](src/collectors/d3dkmt_adapter_perfdata.cc))
+- DXGI VideoMemoryInfo per-process heap budgets ([`src/collectors/dxgi_query_video_memory.cc`](src/collectors/dxgi_query_video_memory.cc))
+- Vulkan VK_EXT_memory_budget ([`src/collectors/vulkan_memory_budget.cc`](src/collectors/vulkan_memory_budget.cc))
+- IGCL power/thermal/clock telemetry ([`src/collectors/igcl_power_telemetry.cc`](src/collectors/igcl_power_telemetry.cc))
 
-All samples are written to a delta-suppressed JSONL event log. Cross-source disagreements
-are detected and tagged in real time.
+All samples flow through an [event bus](src/bus/event_bus.cc) to a
+[delta-suppressed JSONL writer](src/schema/jsonl_writer.cc). Cross-source disagreements
+are detected by [arbitration rules](src/arbitrator/disagreement_rules.cc) and tagged
+in real time. GPU identity is reconciled across all four APIs via
+[LUID-anchored binding](src/identity/reconciler.cc).
 
 **Analysis** — five verbs for interpreting a captured run:
 ```
@@ -79,172 +154,242 @@ not measurably perturb the workloads it observes.
 
 ## The Journey
 
-All experiments were run on 2026-05-28. They proceeded in order, each one building on
-the last.
-
-### Idle Baseline — characterizing the noise floor
-
-**[`docs/baseline-findings-idle.md`](docs/baseline-findings-idle.md)**  
-**Raw log:** `runs/baseline-idle-1/events.jsonl` (304 s, 324 KB)
-
-Five minutes at idle, no inference running. Goal: understand what the rig looks like
-when nothing is happening, so inference deltas are interpretable.
-
-Key finding: the top-slot card's IGCL telemetry is broken in **three distinct categories
-simultaneously** — voltage, frequency, and activity counters all reporting impossible
-values. This confirmed early that "the card is broken" framing was wrong: the telemetry
-path is broken, not the GPU. The idle noise floor settled at exactly 3 disagreement
-classes that would persist unchanged across every subsequent run.
+All experiments ran on 2026-05-28, in order. Each stage builds on the previous one.
+Raw telemetry logs are excluded from git (large JSONL); the findings docs capture
+everything material, with re-run commands so any experiment can be reproduced.
 
 ---
 
-### Single-GPU Inference — establishing the wake signal
+### Stage 1 — Idle Baseline: characterizing the noise floor
 
-**[`docs/findings-single-gpu-mistral24b-1.md`](docs/findings-single-gpu-mistral24b-1.md)**  
-**Raw log:** `runs/single-gpu-mistral24b-1/events.jsonl` (182 s, 243 KB)
+**Findings:** [`docs/baseline-findings-idle.md`](docs/baseline-findings-idle.md)
 
-Mistral-Small-3.2-24B Q4_K_M, bottom-slot card only (`GGML_VK_VISIBLE_DEVICES=0`).
+Five minutes at idle, no inference running. The goal is to know what the rig looks like
+when nothing is happening, so every inference delta is measured against a real reference.
 
-The first successful operational telemetry capture of real Vulkan inference on this rig.
-The active card woke cleanly; the idle card stayed at the noise floor; b70tools itself
-did not perturb anything detectable.
+```powershell
+.\build\b70tools.exe run --ticks 300 --out .\runs\baseline-idle-1
 
-Signal-to-noise on the used card:
-- Activity rate: **10× increase** (32% vs 3% idle)
-- Clock: **5× increase** (2.8 GHz vs 550 MHz)
-- Temperature: **+24 °C die, +26 °C VRAM**
+.\build\b70tools.exe adapters      .\runs\baseline-idle-1
+.\build\b70tools.exe disagreements .\runs\baseline-idle-1
+.\build\b70tools.exe self          .\runs\baseline-idle-1
+```
 
-The "60–95% activity" expectation from the runbook was wrong. 32% is the real signature
-of single-card 24B Q4 Vulkan inference on B70. The runbook was updated.
-
-v1 gap confirmed: b70tools cannot see the 14 GB of model weights loaded onto the card.
-DXGI VMI and Vulkan budget are per-process; our process sees 4 KiB (its own allocs).
-
----
-
-### Per-Card Baselines — proving both GPUs work
-
-**[`docs/findings-single-gpu-both-baselines.md`](docs/findings-single-gpu-both-baselines.md)**  
-**Raw logs:** `runs/single-gpu-mistral24b-1/` and `runs/single-gpu-mistral24b-2/`
-
-The same workload run separately on each card. Top-slot card: 27.8 t/s generation.
-Bottom-slot card: 27.3 t/s generation. Identical to within noise.
-
-This is the key result that retired the "broken card" framing. **The GPU hardware is
-fully healthy. Only the IGCL telemetry path is broken.** The thermal sensors on the
-broken-telemetry card are credible (matched expected physical behavior and operator
-observation). Voltage/frequency/activity counters are not.
-
-The top-slot card's VRAM hit **90 °C** under solo Mistral 24B in the open-case
-workbench setup — highest measured, safe for GDDR6 (spec ~105 °C) but worth watching
-under sustained load. This is purely a physical thermal environment issue, not GPU
-degradation.
+**What was found:** the top-slot card's IGCL telemetry is broken in three distinct
+categories simultaneously — voltage (5.117 V), frequency (8.55 GHz), and activity counters
+(advancing 94× faster than wall clock) — all at idle, all constant, all impossible. The
+"broken card" framing was already wrong before the first inference run. The idle noise
+floor settled at exactly **3 disagreement classes** that would persist unchanged across
+every subsequent experiment.
 
 ---
 
-### Concurrent Dual-Card — new failure mode discovered
+### Stage 2 — Single-GPU Inference: establishing the wake signal
 
-**[`docs/findings-both-cards-concurrent-mistral24b-1.md`](docs/findings-both-cards-concurrent-mistral24b-1.md)**  
-**Raw log:** `runs/both-cards-concurrent-mistral24b-1/events.jsonl` (242 s, 255 KB)
+**Findings:** [`docs/findings-single-gpu-mistral24b-1.md`](docs/findings-single-gpu-mistral24b-1.md)
 
-Two independent `llama-cli` processes, one per card, running the same workload
-simultaneously. Both completed their 1500-token generations. Both delivered ~27–28 t/s.
+Mistral-Small-3.2-24B Q4_K_M, bottom-slot card only. First real Vulkan inference
+telemetry on this rig.
 
-New finding: under concurrent Vulkan initialization, `ctlPowerTelemetryGet` for the
-top-slot card returned non-success for the entire 4-minute window. **Zero thermal, zero
-clock, zero voltage samples emitted for that card.** The disagreement count dropped from
-25 (solo) to 1 — not because things improved, but because the broken source went silent.
+```powershell
+# Terminal 1 — telemetry:
+.\build\b70tools.exe run --ticks 180 --out .\runs\single-gpu-mistral24b-1
 
-A clean disagreement report can mean healthy telemetry or silently failing telemetry.
-This motivated the `previously_reporting_source_went_silent` rule added to v1.5.
+# Terminal 2 — inference on card 0 only:
+$env:GGML_VK_VISIBLE_DEVICES = '0'
+$env:GGML_VK_DISABLE_COOPMAT = '1'
+llama-cli.exe -m Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf `
+    -ngl 99 --no-mmap -dio -c 4096 -n 1500 -p "<prompt>"
 
-Also found: Vulkan init time jumped from ~50 ms to 304 ms (6.1×) due to ICD serialization
-contention. The audit framework caught this honestly.
+# Analysis:
+.\build\b70tools.exe adapters .\runs\single-gpu-mistral24b-1
+```
 
----
+**What was found:** the active card woke cleanly; the idle card stayed at the noise floor.
+Signal-to-noise on the used card: **10× activity rate** (32% vs 3%), **5× clock** (2.8 GHz
+vs 550 MHz), **+24 °C die temperature**. The "60–95% activity" expectation was wrong —
+32% is the real single-card signature for 24B Q4 Vulkan inference on B70. Runbook updated.
 
-### Dual-Card Layer Split, MoE — the milestone
-
-**[`docs/findings-dual-b70-qwen30b-moe-1.md`](docs/findings-dual-b70-qwen30b-moe-1.md)**  
-**Raw log:** `runs/dual-b70-qwen30b-moe-1/events.jsonl` (605 s, 1.15 MB)
-
-Qwen3-30B-A3B (MoE, 3B active params/token, Q4_K_M) via `llama-cli` with
-`-sm layer -ts 1,1 -fit off`. b70tools started 12 s before the workload.
-
-**This is the Experiment 3 milestone** — the first clean dual-B70 layer-split telemetry
-capture. Both cards hit identical 61 °C die peaks. Generation throughput: **81.7 t/s**
-(vs 27 t/s single-card). The silence cascade that had caused system lockups in the
-operator's prior experience did not trigger.
-
-The `-fit off` flag turned out to be critical. Without it, llama.cpp's auto-fit routes
-all layers to one card. With it, the 50/50 split is enforced. The temperature signal —
-both cards heating equally — is the clearest confirmation the split is real.
-
-The IGCL silence rule did not fire. Validated: 0 false positives across ~25 minutes of
-cumulative healthy operation across this and subsequent runs.
+v1 gap confirmed: b70tools cannot see the 14 GB of model weights on the GPU. DXGI VMI and
+Vulkan budget are per-process; our observer process sees only its own 4 KiB allocs.
 
 ---
 
-### Dual-Card Layer Split, Dense — MoE vs dense comparison
+### Stage 3 — Per-Card Baselines: proving both GPUs work
 
-**[`docs/findings-dual-b70-qwen25-32b-q4-1.md`](docs/findings-dual-b70-qwen25-32b-q4-1.md)**  
-**Raw log:** `runs/dual-b70-qwen25-32b-q4-1/events.jsonl` (606 s, 1.16 MB)
+**Findings:** [`docs/findings-single-gpu-both-baselines.md`](docs/findings-single-gpu-both-baselines.md)
 
-Qwen2.5-32B-Instruct Q4_K_M, same dual-split setup. This is the dense model comparison
-to the prior MoE experiment.
+Same workload, run separately on each card to establish individual thermal and throughput
+profiles.
+
+```powershell
+# Card 0 (Vulkan0 = bottom slot, healthy IGCL):
+$env:GGML_VK_VISIBLE_DEVICES = '0'
+.\build\b70tools.exe run --ticks 180 --out .\runs\single-gpu-mistral24b-1
+# ... run llama-cli ...
+.\build\b70tools.exe adapters .\runs\single-gpu-mistral24b-1
+
+# Card 1 (Vulkan1 = top slot, broken IGCL):
+$env:GGML_VK_VISIBLE_DEVICES = '1'
+.\build\b70tools.exe run --ticks 180 --out .\runs\single-gpu-mistral24b-2
+# ... run llama-cli ...
+.\build\b70tools.exe adapters .\runs\single-gpu-mistral24b-2
+```
+
+**What was found:** card 0 delivered 27.3 t/s; card 1 delivered 27.8 t/s. Identical to
+within noise. **The GPU hardware is fully healthy. Only the IGCL telemetry path is broken.**
+"Broken card" is retired; "broken-telemetry card" is the correct framing.
+
+The top-slot card's VRAM hit **90 °C** under solo Mistral 24B in the open-case workbench
+setup — purely a thermal environment issue from the cramped slot, not GPU degradation.
+Thermal sensors on the broken-telemetry card are credible; voltage/frequency/activity are
+not. The per-field credibility model held.
+
+---
+
+### Stage 4 — Concurrent Dual-Card: new failure mode discovered
+
+**Findings:** [`docs/findings-both-cards-concurrent-mistral24b-1.md`](docs/findings-both-cards-concurrent-mistral24b-1.md)
+
+Two independent `llama-cli` processes, one per card, running simultaneously.
+
+```powershell
+# Telemetry first:
+.\build\b70tools.exe run --ticks 240 --out .\runs\both-cards-concurrent-1
+
+# Then both inference processes concurrently:
+$env:GGML_VK_VISIBLE_DEVICES = '0'; $env:GGML_VK_DISABLE_COOPMAT = '1'
+Start-Process llama-cli.exe -ArgumentList "-m <model> -ngl 99 --no-mmap -dio -c 4096 -n 1500 -p <prompt>" `
+    -RedirectStandardOutput .\runs\both-cards-concurrent-1\llama-vk0.log -NoNewWindow
+
+$env:GGML_VK_VISIBLE_DEVICES = '1'
+Start-Process llama-cli.exe -ArgumentList "-m <model> -ngl 99 --no-mmap -dio -c 4096 -n 1500 -p <prompt>" `
+    -RedirectStandardOutput .\runs\both-cards-concurrent-1\llama-vk1.log -NoNewWindow
+
+.\build\b70tools.exe adapters .\runs\both-cards-concurrent-1
+```
+
+**What was found:** both cards delivered ~27–28 t/s (identical). But under concurrent
+Vulkan initialization, `ctlPowerTelemetryGet` for the top-slot card returned non-success
+for the **entire 4-minute window** — zero thermal, zero clock, zero voltage. The
+disagreement count dropped from 25 to 1, not because things improved but because the
+broken source went silent.
+
+A clean disagreement report can mean healthy telemetry **or** silently failing telemetry.
+This is the insight that motivated the `previously_reporting_source_went_silent` rule.
+Vulkan init time also jumped from ~50 ms to 304 ms (6.1×) due to ICD serialization
+contention — caught honestly by the [library audit](src/runtime/library_audit.cc).
+
+---
+
+### Stage 5 — Dual-Card Layer Split, MoE: the milestone
+
+**Findings:** [`docs/findings-dual-b70-qwen30b-moe-1.md`](docs/findings-dual-b70-qwen30b-moe-1.md)
+
+Qwen3-30B-A3B (MoE, 3B active params/token, ~17 GB Q4_K_M), layer-split across both
+cards. The experiment this whole project was built for.
+
+```powershell
+# Telemetry first — always start b70tools before the workload:
+.\build\b70tools.exe run --ticks 600 --out .\runs\dual-b70-qwen30b-moe-1
+
+# Wait 12-15 s, then inference:
+$env:GGML_VK_VISIBLE_DEVICES = '0,1'
+$env:GGML_VK_DISABLE_COOPMAT = '1'
+llama-cli.exe -m Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf `
+    -ngl 99 -sm layer -ts 1,1 -fit off --no-mmap -dio -c 4096 -n 2000 -p "<prompt>"
+
+.\build\b70tools.exe adapters      .\runs\dual-b70-qwen30b-moe-1
+.\build\b70tools.exe disagreements .\runs\dual-b70-qwen30b-moe-1
+```
+
+**What was found:** both cards hit **identical 61 °C die peaks** — the clearest evidence
+the layer split engaged both equally. Generation throughput: **81.7 t/s** (3× better than
+single-card 27 t/s). The `-fit off` flag is critical; without it, llama.cpp auto-routes
+all layers to one card. The silence cascade that had caused prior system lockups did not
+trigger. The IGCL silence rule fired zero false positives across ~25 minutes of cumulative
+operation.
+
+State B airflow improvement (pre-run) dropped the cramped top-slot card's VRAM from
+90 °C (State A solo) to **64 °C** — a 26 °C reduction from the combination of better
+airflow and halved per-card load.
+
+---
+
+### Stage 6 — Dual-Card Layer Split, Dense: MoE vs dense comparison
+
+**Findings:** [`docs/findings-dual-b70-qwen25-32b-q4-1.md`](docs/findings-dual-b70-qwen25-32b-q4-1.md)
+
+Qwen2.5-32B-Instruct Q4_K_M (~18.5 GB dense), same dual-split setup. Dense model
+comparison to the MoE experiment above.
+
+```powershell
+.\build\b70tools.exe run --ticks 600 --out .\runs\dual-b70-qwen25-32b-q4-1
+
+$env:GGML_VK_VISIBLE_DEVICES = '0,1'
+$env:GGML_VK_DISABLE_COOPMAT = '1'
+llama-cli.exe -m qwen2.5-32b-instruct-q4_K_M.gguf `
+    -ngl 99 -sm layer -ts 1,1 -fit off --no-mmap -dio -c 4096 -n 2000 -p "<prompt>"
+
+.\build\b70tools.exe adapters .\runs\dual-b70-qwen25-32b-q4-1
+```
+
+**What was found:**
 
 | | Qwen3-30B MoE | Qwen2.5-32B dense |
 |---|---|---|
 | Prompt eval | 30.1 t/s | **242.2 t/s** (8× faster) |
-| Generation | **81.7 t/s** | 20.7 t/s |
+| Generation | **81.7 t/s** | 20.7 t/s (4× slower) |
 | Die temp peak | 61 °C | 66 °C |
 | VRAM temp peak (top card) | 64 °C | 74 °C |
 | Fan peak | 1083 RPM | 1370 RPM |
 
-**Use MoE for fast iterative work; dense for structured output or long-context analysis.**
-The "+5–10 °C across the board" thermal delta on dense is the telemetry signature of
+**MoE for fast iterative work; dense for structured output or deep analysis.** The
+"+5–10 °C across the board" thermal delta on dense is the telemetry signature of
 sustained full-parameter compute vs sparse-activation inference.
 
 ---
 
-## Performance Reference (this rig, driver 32.0.101.8801)
+## Performance Reference
+
+Measured on this rig. Driver 32.0.101.8801. Open workbench (State B airflow).
 
 ```
 Workload                          Config        Gen t/s   Prompt t/s   VRAM/card
-Mistral-Small-3.2-24B Q4_K_M     Single card   27         ~400–443     14 GB
-Qwen3-30B-A3B MoE Q4_K_M         Dual split    81.7       30.1         8.5 GB
-Qwen2.5-32B-Instruct Q4_K_M      Dual split    20.7       242.2        9.3 GB
+Mistral-Small-3.2-24B Q4_K_M     Single card    27.3      ~400–443      14 GB
+Qwen3-30B-A3B MoE Q4_K_M         Dual split     81.7        30.1        8.5 GB
+Qwen2.5-32B-Instruct Q4_K_M      Dual split     20.7       242.2        9.3 GB
 ```
 
-Observation cost across all runs: **16.6 MiB RSS, <130 ms init, 0 watchdog kicks.**
+Observation cost (all runs): **16.6 MiB RSS · <130 ms init · 0 watchdog kicks · PASS**
+
+Full run index with raw log sizes, timing charts, and thermal tables:
+[`b70tools_5_28_repo_status.md`](b70tools_5_28_repo_status.md)
 
 ---
 
 ## Known Rig-Specific Issues
 
-These are stable, characterized, and filed in the noise floor. They do not affect
-inference quality — only what b70tools can credibly report about it.
+Stable, characterized, filed in the noise floor. Do not affect inference quality —
+only what b70tools can credibly report about it.
 
 | Issue | Card | Impact |
 |---|---|---|
-| IGCL voltage/frequency reads wrong registers (5.117 V / 8.55 GHz at idle) | Top slot (adapter_00012fbe) | Voltage and freq telemetry for this card is unusable; temperature is credible |
-| IGCL activity counters run ~45–94× wall clock | Top slot | Activity counters for this card are unusable |
-| IGCL may go completely silent under concurrent Vulkan init | Top slot | Zero telemetry during contention window; `previously_reporting_source_went_silent` rule fires if this recurs |
+| IGCL reads wrong registers (5.117 V / 8.55 GHz at idle) | Top slot | Voltage and freq unusable; temperature is credible |
+| IGCL activity counters run ~45–94× wall clock | Top slot | Activity counters unusable for this card |
+| IGCL goes completely silent under concurrent Vulkan init | Top slot | Zero telemetry during contention; silence rule fires if it recurs |
 | D3DKMT `ADAPTERPERFDATA` returns INVALID_PARAMETER | Both | Expected on Win10 19045; flagged once per session |
-| Cannot see workload VRAM residency | Both | DXGI/Vulkan budget are per-process; 14–18 GB of model weights are invisible to v1 |
+| Workload VRAM residency invisible | Both | DXGI/Vulkan budget are per-process; model weights are invisible to v1 |
 
-The VRAM blindspot is the most operationally significant. v1.5's PDH `GPU Process Memory`
-collector is the fix.
+The VRAM blindspot is the most operationally significant gap. v1.5's PDH `GPU Process
+Memory` collector is the fix.
 
 ---
 
-## Status
+## Status & What's Next
 
-**v1 is complete.** All planned experiments have been run. The architecture is stable,
-the noise floor is characterized, and the do-no-harm budget held across every run.
-
-See [`b70tools_5_28_repo_status.md`](b70tools_5_28_repo_status.md) for the full run
-index with raw log links, timing charts, and comparison tables.
+**v1 is complete.** All planned experiments have been run. The noise floor is
+characterized, the do-no-harm budget held across every run, and the architecture is stable.
 
 **v1.5 priorities:**
 1. PDH `GPU Process Memory` — removes the VRAM blindspot
@@ -254,38 +399,25 @@ index with raw log links, timing charts, and comparison tables.
 
 ---
 
-## Getting Started
-
-If you have an Arc Pro B70 and want to run this yourself:
-
-→ **[`docs/runbook-fresh-b70-pc.md`](docs/runbook-fresh-b70-pc.md)** — complete setup
-guide from unboxing to first telemetry capture, including driver gotchas, llama.cpp
-Vulkan setup, build instructions, and thermal management tips.
-
-Quick build:
-```powershell
-git clone https://github.com/djcdevelopment/b70tools.git
-cd b70tools
-.\build.ps1
-.\build\b70tools.exe --enumerate --out .\runs\preflight
-```
-
-Requires Visual Studio 2022 Community with the "Desktop development with C++" workload.
-
----
-
 ## Repo Layout
 
 ```
-src/               C++ source (collectors, arbitrator, schema, identity, runtime, tools)
-docs/              Findings docs and runbooks
-eval/              Automated model evaluation framework + scripts
+src/
+  arbitrator/      disagreement_rules.cc — cross-source conflict detection
+  bus/             event_bus.cc — metric pub/sub
+  collectors/      d3dkmt, dxgi, vulkan, igcl, pdh, host_memory
+  identity/        reconciler.cc — LUID-anchored cross-API binding
+  runtime/         poll_loop, session, watchdog, library_audit, driver_fingerprint
+  schema/          events, metric_sample, jsonl_writer, delta_filter
+  tools/           adapters, summarize, disagreements, self, verdict (CLI verbs)
+  main.cc
+docs/              findings docs + runbooks
+eval/              automated model evaluation framework + scripts
 third_party/       Vulkan-Headers (Khronos), IGCL (Intel)
-build.ps1          Build script (locates MSVC, runs CMake + Ninja)
-CMakeLists.txt     Build configuration
-b70tools_5_28_repo_status.md   Full run index + timing charts + status snapshot
+build.ps1          build script (locates MSVC, runs CMake + Ninja)
+CMakeLists.txt
+b70tools_5_28_repo_status.md   full run index, timing charts, status snapshot
 ```
 
-Raw telemetry logs (`runs/`) are excluded from git — they're large JSONL files and
-regenerable. The findings docs summarize everything that matters from each run, with
-re-run instructions so any experiment can be reproduced.
+Raw telemetry logs (`runs/`) are excluded from git — large JSONL, regenerable. The
+findings docs capture everything material from each run, with re-run commands.
