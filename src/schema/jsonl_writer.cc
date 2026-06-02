@@ -4,6 +4,7 @@
 #include "schema/json_emit.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 
@@ -31,10 +32,22 @@ bool JsonlWriter::open(const std::filesystem::path& jsonl_path,
 
 void JsonlWriter::close() {
     if (file_) {
-        std::fflush(file_);
+        flush();
         std::fclose(file_);
         file_ = nullptr;
     }
+}
+
+void JsonlWriter::flush() {
+    if (!file_) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::fflush(file_);
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    ++flush_count_;
+    flush_total_ns_ += ns;
+    flush_max_ns_ = std::max(flush_max_ns_, ns);
 }
 
 void JsonlWriter::write_line(std::string_view sv) {

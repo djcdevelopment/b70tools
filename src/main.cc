@@ -5,6 +5,7 @@
 #include "collectors/dxgi_query_video_memory.h"
 #include "collectors/host_memory.h"
 #include "collectors/pdh_gpu_memory.h"
+#include "collectors/pdh_gpu_engine.h"
 #include "collectors/fake_collector.h"
 #include "collectors/igcl_power_telemetry.h"
 #include "collectors/vulkan_memory_budget.h"
@@ -35,6 +36,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -52,7 +55,9 @@ struct Args {
     std::filesystem::path out_dir = "out/dryrun";
     std::uint64_t ticks = 5;
     std::uint64_t cadence_ms = 1000;
+    std::uint64_t slow_cadence_ms = 15000;
     bool no_sleep = false;
+    bool flush_every_tick = false;
 };
 
 bool parse_args(int argc, char** argv, Args& a) {
@@ -68,13 +73,18 @@ bool parse_args(int argc, char** argv, Args& a) {
             a.ticks = std::strtoull(argv[++i], nullptr, 10);
         } else if (s == "--cadence-ms" && i + 1 < argc) {
             a.cadence_ms = std::strtoull(argv[++i], nullptr, 10);
+        } else if (s == "--slow-cadence-ms" && i + 1 < argc) {
+            a.slow_cadence_ms = std::strtoull(argv[++i], nullptr, 10);
         } else if (s == "--no-sleep") {
             a.no_sleep = true;
+        } else if (s == "--flush-every-tick") {
+            a.flush_every_tick = true;
         } else if (s == "--out" && i + 1 < argc) {
             a.out_dir = argv[++i];
         } else if (s == "--help" || s == "-h") {
             std::printf("usage: b70tools [--dry-run | --enumerate | --run] "
-                        "[--ticks N] [--cadence-ms N] [--no-sleep] [--out DIR]\n");
+                        "[--ticks N] [--cadence-ms N] [--slow-cadence-ms N] [--no-sleep] "
+                        "[--flush-every-tick] [--out DIR]\n");
             return false;
         } else {
             std::fprintf(stderr, "unknown arg: %.*s\n", static_cast<int>(s.size()), s.data());
@@ -266,6 +276,10 @@ int run_enumerate(const Args& a) {
 
 int run_real(const Args& a) {
     namespace fs = std::filesystem;
+    if (a.cadence_ms == 0) {
+        std::fprintf(stderr, "cadence-ms must be > 0\n");
+        return 2;
+    }
     fs::path out_dir = (a.out_dir == fs::path("out/dryrun")) ? fs::path("runs/run") : a.out_dir;
     fs::create_directories(out_dir);
     const auto jsonl_path  = out_dir / "events.jsonl";
@@ -330,6 +344,7 @@ int run_real(const Args& a) {
     b70::IgclPowerTelemetryCollector     igcl;
     b70::HostMemoryCollector             host_mem;
     b70::PdhGpuMemoryCollector           pdh_mem;
+    b70::PdhGpuEngineCollector           pdh_engine;
 
     const bool ok_d3dkmt    = audit_init(d3dkmt);
     const bool ok_dxgivmi   = audit_init(dxgi_vmi);
@@ -337,38 +352,51 @@ int run_real(const Args& a) {
     const bool ok_igcl      = audit_init(igcl);
     const bool ok_host_mem  = audit_init(host_mem);
     const bool ok_pdh_mem   = audit_init(pdh_mem);
+    const bool ok_pdh_engine = audit_init(pdh_engine);
 
     b70::PollLoop::Options po;
     po.cadence_ns = a.cadence_ms * 1'000'000ull;
     po.jitter_ns  = std::min<std::uint64_t>(50'000'000ull, po.cadence_ns / 20);
     po.max_ticks  = a.ticks;
     po.sleep_between_ticks = !a.no_sleep;
+    const bool live_flush = (a.ticks == 0) || a.flush_every_tick;
+    if (live_flush) {
+        po.after_tick = [&writer]() { writer.flush(); };
+    }
+    const std::uint64_t slow_ticks =
+        std::max<std::uint64_t>(1, (a.slow_cadence_ms + a.cadence_ms - 1) / a.cadence_ms);
 
     b70::PollLoop loop(&bus, &session, &wd, po);
     loop.set_stop_flag(&g_stop_requested);
     std::signal(SIGINT, handle_sigint);
     if (ok_d3dkmt)    loop.add_collector(&d3dkmt);
-    if (ok_dxgivmi)   loop.add_collector(&dxgi_vmi);
-    if (ok_vkmem)     loop.add_collector(&vk_mem);
+    if (ok_dxgivmi)   loop.add_collector(&dxgi_vmi, slow_ticks);
+    if (ok_vkmem)     loop.add_collector(&vk_mem, slow_ticks);
     if (ok_igcl)      loop.add_collector(&igcl);
     if (ok_host_mem)  loop.add_collector(&host_mem);
-    if (ok_pdh_mem)   loop.add_collector(&pdh_mem);
+    if (ok_pdh_mem)   loop.add_collector(&pdh_mem, slow_ticks);
+    if (ok_pdh_engine) loop.add_collector(&pdh_engine);
 
     std::printf("=== b70tools --run ===\n");
     std::printf("output:        %s\n", jsonl_path.string().c_str());
     std::printf("adapters:      %zu\n", rec.adapters.size());
-    std::printf("collectors:    d3dkmt=%s, dxgi_vmi=%s, vulkan_budget=%s, igcl=%s, host_mem=%s, pdh_mem=%s\n",
+    std::printf("collectors:    d3dkmt=%s, dxgi_vmi=%s, vulkan_budget=%s, igcl=%s, host_mem=%s, pdh_mem=%s, pdh_engine=%s\n",
                 ok_d3dkmt ? "OK" : "SKIP",
                 ok_dxgivmi ? "OK" : "SKIP",
                 ok_vkmem ? "OK" : "SKIP",
                 ok_igcl ? "OK" : "SKIP",
                 ok_host_mem ? "OK" : "SKIP",
-                ok_pdh_mem ? "OK" : "SKIP");
+                ok_pdh_mem ? "OK" : "SKIP",
+                ok_pdh_engine ? "OK" : "SKIP");
     std::printf("cadence:       %llu ms (jitter ±%llu ns), ticks=%llu, sleep=%s\n",
                 static_cast<unsigned long long>(a.cadence_ms),
                 static_cast<unsigned long long>(po.jitter_ns),
                 static_cast<unsigned long long>(po.max_ticks),
                 po.sleep_between_ticks ? "yes" : "no");
+    std::printf("slow sources:  dxgi_vmi/vulkan_budget/pdh_mem every %llu ms (%llu base ticks)\n",
+                static_cast<unsigned long long>(a.slow_cadence_ms),
+                static_cast<unsigned long long>(slow_ticks));
+    std::printf("live flush:    %s\n", live_flush ? "per tick" : "buffered until close");
     std::fflush(stdout);
 
     loop.run_until_max_ticks();
@@ -379,6 +407,33 @@ int run_real(const Args& a) {
                 static_cast<unsigned long long>(writer.lines_written()));
     std::printf("disagreement rpts:  %llu\n",
                 static_cast<unsigned long long>(rules.reports_emitted()));
+    const auto collector_stats = loop.collector_stats();
+    if (!collector_stats.empty()) {
+        std::printf("\ncollector poll cost:\n");
+        for (const auto& stat : collector_stats) {
+            const double avg_us = stat.poll_calls
+                ? (static_cast<double>(stat.total_poll_ns) / static_cast<double>(stat.poll_calls)) / 1e3
+                : 0.0;
+            const double max_us = static_cast<double>(stat.max_poll_ns) / 1e3;
+            std::printf("  %-18s calls=%-4llu avg=%.1f us max=%.1f us\n",
+                        stat.collector_name.c_str(),
+                        static_cast<unsigned long long>(stat.poll_calls),
+                        avg_us,
+                        max_us);
+        }
+    }
+    if (live_flush) {
+        const double avg_flush_us = writer.flush_count()
+            ? (static_cast<double>(writer.flush_total_ns()) / static_cast<double>(writer.flush_count())) / 1e3
+            : 0.0;
+        const double max_flush_us = static_cast<double>(writer.flush_max_ns()) / 1e3;
+        std::printf("\nlive flush cost:\n");
+        std::printf("  flushes=%llu avg=%.1f us max=%.1f us total=%.3f ms\n",
+                    static_cast<unsigned long long>(writer.flush_count()),
+                    avg_flush_us,
+                    max_flush_us,
+                    static_cast<double>(writer.flush_total_ns()) / 1e6);
+    }
 
     bool all_advanced_past_unknown = true;
     for (const auto& a_id : rec.adapters) {
@@ -406,6 +461,7 @@ int run_real(const Args& a) {
                 all_advanced_past_unknown ? "PASS" : "FAIL");
     std::printf("  - No VkDevice, no GPU allocation .......... PASS (collectors declared PassiveSafe)\n");
 
+    pdh_engine.shutdown();
     pdh_mem.shutdown();
     host_mem.shutdown();
     igcl.shutdown();
@@ -476,12 +532,14 @@ int main(int argc, char** argv) {
         if (v == "run") {
             Args ra;
             ra.run = true;
-            // accept --ticks / --cadence-ms / --no-sleep / --out after "run"
+            // accept --ticks / --cadence-ms / --no-sleep / --flush-every-tick / --out after "run"
             for (int i = 2; i < argc; ++i) {
                 std::string_view s = argv[i];
                 if (s == "--ticks" && i + 1 < argc)         ra.ticks = std::strtoull(argv[++i], nullptr, 10);
                 else if (s == "--cadence-ms" && i + 1 < argc) ra.cadence_ms = std::strtoull(argv[++i], nullptr, 10);
+                else if (s == "--slow-cadence-ms" && i + 1 < argc) ra.slow_cadence_ms = std::strtoull(argv[++i], nullptr, 10);
                 else if (s == "--no-sleep")                 ra.no_sleep = true;
+                else if (s == "--flush-every-tick")         ra.flush_every_tick = true;
                 else if (s == "--out" && i + 1 < argc)      ra.out_dir = argv[++i];
             }
             return run_real(ra);
@@ -494,7 +552,8 @@ int main(int argc, char** argv) {
     if (a.run) return run_real(a);
     std::fprintf(stderr,
         "b70tools: no mode selected.\n"
-        "  b70tools run [--ticks N] [--cadence-ms N] [--no-sleep] [--out DIR]\n"
+        "  b70tools run [--ticks N] [--cadence-ms N] [--slow-cadence-ms N] [--no-sleep]\n"
+        "                [--flush-every-tick] [--out DIR]\n"
         "                Tier 0 + Tier 1 polling on the real rig.\n"
         "  b70tools summarize <run-dir-or-jsonl>\n"
         "                Print structured text report of a recorded run.\n"

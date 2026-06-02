@@ -38,6 +38,7 @@ set(B70_SOURCES
     src/collectors/igcl_power_telemetry.cc
     src/collectors/host_memory.cc
     src/collectors/pdh_gpu_memory.cc
+    src/collectors/pdh_gpu_engine.cc
 
     src/tools/verdict.cc
 

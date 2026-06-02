@@ -248,6 +248,7 @@ bool is_peak_metric_name(std::string_view n) {
         "gpu.temperature_c",
         "gpu.frequency_hz",
         "gpu.voltage_v",
+        "gpu.engine.utilization_pct",
         "gpu.activity.global_counter",
         "gpu.activity.render_compute_counter",
         "gpu.activity.media_counter",
