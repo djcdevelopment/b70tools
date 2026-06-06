@@ -79,6 +79,8 @@ Analyze after:
 New to the hardware? The full setup guide is at
 [`docs/runbook-fresh-b70-pc.md`](docs/runbook-fresh-b70-pc.md) — driver install, llama.cpp
 Vulkan setup, thermal management tips, and a complete experiment walkthrough.
+For the Ollama launch recipe on the second B70, see
+[`docs/local-inference-runbook.md`](docs/local-inference-runbook.md).
 
 ---
 
