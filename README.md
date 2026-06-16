@@ -394,9 +394,18 @@ only what b70tools can credibly report about it.
 | IGCL goes completely silent under concurrent Vulkan init | Top slot | Zero telemetry during contention; silence rule fires if it recurs |
 | D3DKMT `ADAPTERPERFDATA` returns INVALID_PARAMETER | Both | Expected on Win10 19045; flagged once per session |
 | Workload VRAM residency invisible | Both | DXGI/Vulkan budget are per-process; model weights are invisible to v1 |
+| Shared-GPU-memory spillover under near-VRAM-ceiling dual split | Either | Observed live (2026-06-16): 70B `-fit off -ts 1,1` overloaded one card past its 32 GB dedicated and spilled ~6 GB into host memory. b70tools' PDH per-adapter signal **caught it** (`non_local` committed ≈ Task Manager shared). The 48 GB-per-card (32 dedicated + 16 shared) mechanism, confirmed in a real workload. |
+| The real host wall is **commit charge, not free RAM** | Host | Under dual-card load, physical RAM stayed at 60% (~13.5 GB free) while commit hit **92%** of the limit (83.1 / 89.9 GB). At the commit ceiling, allocations fail regardless of free RAM. Implication: the `verdict` gate should watch `host.commit.available_bytes`, not free RAM. |
 
 The VRAM blindspot is the most operationally significant gap. v1.5's PDH `GPU Process
 Memory` collector is the fix.
+
+**Recent investigations (WoW realtime-inference research line):** an overnight three-repo
+regression harness + a 7-model GPU stress sweep, with the two rig findings above. Plan + results
+in [`docs/overnight-regression-plan-2026-06-16.md`](docs/overnight-regression-plan-2026-06-16.md),
+queued follow-ups in [`docs/inference-test-backlog.md`](docs/inference-test-backlog.md),
+retrospective in
+[`docs/retrospective-wow-realtime-inference-impact-overnight-2026-06-16.md`](docs/retrospective-wow-realtime-inference-impact-overnight-2026-06-16.md).
 
 ---
 
