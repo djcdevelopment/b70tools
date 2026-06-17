@@ -21,17 +21,17 @@
 #   .\Start-ParserRegressionSweep.ps1 -SinceDate 2026-06-01 -SkipBuild
 
 param(
-    [string]   $TempoRoot   = 'D:\World of Warcraft\Tempo',
+    [string]   $TempoRoot   = 'C:\path\to\World of Warcraft\Tempo',
     [string]   $LeopardRoot = 'D:\work\leopard',
-    [string]   $LogsDir     = 'D:\World of Warcraft\_retail_\Logs',
+    [string]   $LogsDir     = 'C:\path\to\World of Warcraft\_retail_\Logs',
     [string]   $OutRoot     = 'D:\work\b70tools\runs',
     [string]   $CacheRoot   = 'D:\work\b70tools\runs\_evidence-cache',
     # Combat logs with LastWriteTime >= this date are swept. Default = post round-1.
     [datetime] $SinceDate   = '2026-06-01',
     # Canon fixtures always included (curated, stable inputs).
     [string[]] $CanonFixtures = @(
-        'D:\World of Warcraft\Tempo\fixture-canon\fixtures\2026-05-27-m+-mixed-keys\WoWCombatLog-2026-05-27-m+-mixed-keys.txt',
-        'D:\World of Warcraft\Tempo\docs\liveplay-2026-05-26\WoWCombatLog-pit-plus11.txt'
+        'C:\path\to\World of Warcraft\Tempo\fixture-canon\fixtures\2026-05-27-m+-mixed-keys\WoWCombatLog-2026-05-27-m+-mixed-keys.txt',
+        'C:\path\to\World of Warcraft\Tempo\docs\liveplay-2026-05-26\WoWCombatLog-pit-plus11.txt'
     ),
     [double]   $MemBudgetGB = 2.2,
     [switch]   $SkipBuild,

@@ -11,7 +11,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\wow-impact\Sta
   -Scenario "wow-only-baseline" `
   -DurationSec 300 `
   -TailWowLog `
-  -WowLogPath "D:\World of Warcraft\_retail_\Logs\WoWCombatLog-052926_040215.txt" `
+  -WowLogPath "C:\path\to\World of Warcraft\_retail_\Logs\WoWCombatLog.txt" `
   -WowLogTailIntervalSec 7 `
   -DisplayAdapterId "adapter_..." `
   -InferenceAdapterId "adapter_..."

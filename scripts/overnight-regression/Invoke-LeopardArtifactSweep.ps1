@@ -22,7 +22,7 @@
 
 param(
     [string]   $LeopardRoot = 'D:\work\leopard',
-    [string]   $LogsDir     = 'D:\World of Warcraft\_retail_\Logs',
+    [string]   $LogsDir     = 'C:\path\to\World of Warcraft\_retail_\Logs',
     [string]   $OutRoot     = 'D:\work\b70tools\runs',
     [datetime] $SinceDate   = '2026-06-01',
     [int]      $Port        = 5280,

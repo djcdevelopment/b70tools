@@ -3,7 +3,7 @@ param(
     [int]$InferenceDelaySec = 420,
     [string]$RunRoot = 'D:\work\b70tools\runs',
     [string]$B70Tools = 'D:\work\b70tools\build\b70tools.exe',
-    [string]$WowLogPath = 'D:\World of Warcraft\_retail_\Logs\WoWCombatLog-052926_040215.txt',
+    [string]$WowLogPath = 'C:\path\to\World of Warcraft\_retail_\Logs\WoWCombatLog.txt',
     [string]$LlamaCliBin = 'D:\work\battlemage\llamacpp-win-vulkan\llama-cli.exe',
     [string]$ModelPath = 'D:\work\battlemage\models\qwen2.5-14b-instruct-q4_K_M.gguf',
     [string]$VisibleDevices = '1',

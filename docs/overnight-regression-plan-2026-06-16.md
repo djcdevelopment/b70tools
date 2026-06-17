@@ -1,6 +1,6 @@
 # Overnight regression + dual-B70 plan — 2026-06-16
 
-**Owner:** b70tools (experiment owner). **Workload supplier:** Tempo (`D:\World of Warcraft\Tempo`).
+**Owner:** b70tools (experiment owner). **Workload supplier:** Tempo (`C:\path\to\World of Warcraft\Tempo`).
 **Trigger:** new combat-log corpus generated post-driver-update, plus the percolation/
 reaction-rate "maths" ported JS → C# into the Tempo parser/analysis pipeline.
 
@@ -13,7 +13,7 @@ runs so the inference comparison is apples-to-apples.
 The research line spans three repos. Both math layers were ported out of JS and need
 regression coverage:
 
-- **Tempo** (`D:\World of Warcraft\Tempo`, C#) — the **parser engine** plus the
+- **Tempo** (`C:\path\to\World of Warcraft\Tempo`, C#) — the **parser engine** plus the
   **percolation/reaction maths** in `Tempo.Core/Analysis/Percolation/`. Tests: the JS↔C#
   golden `Parity/` tree + Percolation/ReactionRate in `Tempo.Core.Tests`.
 - **leopard-host** (`D:\work\leopard\src\leopard-host`, C#) — the **RaidUI math corpus**,
