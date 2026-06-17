@@ -117,6 +117,13 @@ void emit_pct(EventBus& bus,
               std::uint64_t latency,
               std::uint64_t window_ns,
               double pct) {
+    // Regression note: we intentionally sum concurrent engine families
+    // (3D+compute+copy+video) rather than reporting the busiest engine, so the
+    // raw per-adapter sum can exceed 100% under mixed gaming load. Clamp at the
+    // emission boundary so downstream consumers never fall back to the degraded
+    // IGCL render-compute counter when the card is busiest.
+    const double clamped_pct = std::clamp(pct, 0.0, 100.0);
+
     MetricSample m;
     m.metric_name        = "gpu.engine.utilization_pct";
     m.adapter_id         = adapter_id;
@@ -130,7 +137,7 @@ void emit_pct(EventBus& bus,
     m.observation_kind   = ObservationKind::DerivedFromDelta;
     m.correlation_method = CorrelationMethod::LUID_DirectBind;
     m.confidence         = Confidence::High;
-    m.value              = pct;
+    m.value              = clamped_pct;
     bus.publish(m);
 }
 
@@ -299,7 +306,7 @@ void PdhGpuEngineCollector::poll(std::uint64_t now_qpc_ns,
                  now_qpc_ns,
                  latency_ns,
                  window_ns,
-                 std::clamp(entry.pct, 0.0, 100.0));
+                 entry.pct);
     }
 }
 

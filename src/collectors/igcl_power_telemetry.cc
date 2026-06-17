@@ -64,6 +64,26 @@ bool normalize_item(const ctl_oc_telemetry_item_t& it, Unit& out_unit, double& o
     }
 }
 
+bool is_physically_impossible_igcl_sample(const char* metric_name,
+                                          SemanticDomain domain,
+                                          Unit unit,
+                                          double value) {
+    if (unit == Unit::Volts) return value < 0.0 || value > 2.0;
+    if (unit == Unit::Celsius) return value < -10.0 || value > 120.0;
+    if (unit == Unit::Percent) return value < -1.0 || value > 110.0;
+    if (unit == Unit::Rpm) return value < 0.0 || value > 10000.0;
+    if (unit == Unit::BytesPerSecond) {
+        constexpr double kBwCeilingBps = 10.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0;
+        return value < 0.0 || value > kBwCeilingBps;
+    }
+    if (unit == Unit::Hertz && domain == SemanticDomain::Frequency) {
+        const bool is_vram = std::strncmp(metric_name, "vram.", 5) == 0;
+        const double ceiling = is_vram ? 4.0e9 : 5.0e9;
+        return value < 0.0 || value > ceiling;
+    }
+    return false;
+}
+
 }
 
 struct IgclPowerTelemetryCollector::Impl {
@@ -219,6 +239,12 @@ void IgclPowerTelemetryCollector::poll(std::uint64_t now_qpc_ns,
         m.correlation_method = CorrelationMethod::LUID_DirectBind;
         m.confidence = Confidence::High;
         m.value = v;
+        if (is_physically_impossible_igcl_sample(metric_name, dom, u, v)) {
+            m.observation_kind = ObservationKind::Reported_Untrusted;
+            m.confidence = Confidence::Low;
+            m.flags |= flags::Stale;
+            m.source_detail = "source_degraded:physically_impossible";
+        }
         bus.publish(m);
     };
 

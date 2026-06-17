@@ -12,3 +12,11 @@ eval/snapshots/
 .vscode/
 .claude/
 CMakeUserPresets.json
+
+# Scratch / local-only artifacts
+tmp/
+make_chart.py
+stress-suite-progress.png
+
+# Third-party closed-source utility — not redistributable, kept local only
+third_party/ZenTimings_v1.39/

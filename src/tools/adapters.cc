@@ -125,13 +125,25 @@ struct SeriesAcc {
     std::size_t n = 0;
     std::string unit;
     std::string source;
+    std::map<std::string, std::size_t> source_counts;
+    std::size_t low_confidence_samples = 0;
+    std::size_t untrusted_samples = 0;
+    std::size_t stale_samples = 0;
+    std::size_t impossible_samples = 0;
 
-    void add(double v, std::uint64_t ts, const std::string& u, const std::string& src) {
+    void add(double v, std::uint64_t ts, const std::string& u, const std::string& src,
+             const std::string& confidence, const std::string& observation_kind,
+             std::uint64_t flags, bool impossible) {
         if (n == 0) { first = v; first_ts = ts; unit = u; source = src; }
         last = v; last_ts = ts;
         if (v < min) min = v;
         if (v > max) max = v;
         sum += v;
+        ++source_counts[src];
+        if (confidence == "Low" || confidence == "Disagreed") ++low_confidence_samples;
+        if (observation_kind == "Reported_Untrusted") ++untrusted_samples;
+        if ((flags & 1ull) != 0) ++stale_samples;
+        if (impossible) ++impossible_samples;
         ++n;
     }
     double mean() const { return n ? sum / n : 0.0; }
@@ -206,12 +218,46 @@ bool is_vram_usage_metric(const std::string& name) {
            name == "vulkan.heap0.usage_bytes";
 }
 
+bool is_physically_impossible_sample(const std::string& name, const std::string& unit, double v) {
+    if (unit == "Volts") return v < 0.0 || v > 2.0;
+    if (unit == "Celsius") return v < -10.0 || v > 120.0;
+    if (unit == "Percent") return v < -1.0 || v > 110.0;
+    if (unit == "Rpm") return v < 0.0 || v > 10000.0;
+    if (unit == "BytesPerSecond") {
+        constexpr double kBwCeilingBps = 10.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0;
+        return v < 0.0 || v > kBwCeilingBps;
+    }
+    if (unit == "Hertz") {
+        const bool is_vram = name.find("vram.") == 0;
+        const bool is_freq = name.find("frequency") != std::string::npos;
+        if (!is_freq) return false;
+        const double ceiling = is_vram ? 4.0e9 : 5.0e9;
+        return v < 0.0 || v > ceiling;
+    }
+    return false;
+}
+
+std::string source_summary(const SeriesAcc& s) {
+    std::string out;
+    for (const auto& [src, n] : s.source_counts) {
+        if (!out.empty()) out += ",";
+        out += src;
+        if (s.source_counts.size() > 1) {
+            out += ":";
+            out += std::to_string(n);
+        }
+    }
+    return out.empty() ? s.source : out;
+}
+
 // Whitelist of metrics worth keeping a time-series for (the rest get dropped to save memory).
 bool is_track_metric(const std::string& n) {
     static const std::string_view names[] = {
         "vram.local.current_usage_bytes",
         "vram.local.budget_bytes",
         "vram.non_local.current_usage_bytes",
+        "gpu.adapter.vram.local.bytes_committed",
+        "gpu.adapter.vram.non_local.bytes_committed",
         "vulkan.heap0.usage_bytes",
         "vulkan.heap0.budget_bytes",
         "vulkan.heap1.usage_bytes",
@@ -295,7 +341,11 @@ int run_adapters_command(const std::filesystem::path& arg) {
             const std::uint64_t ts = ts_i ? static_cast<std::uint64_t>(*ts_i) : 0;
             const std::string unit   = find_string(sv, "u").value_or("");
             const std::string source = find_string(sv, "s").value_or("");
-            a.series[name].add(*v, ts, unit, source);
+            const std::string confidence = find_string(sv, "f").value_or("");
+            const std::string observation_kind = find_string(sv, "o").value_or("");
+            const std::uint64_t flags = static_cast<std::uint64_t>(find_int(sv, "g").value_or(0));
+            a.series[name].add(*v, ts, unit, source, confidence, observation_kind, flags,
+                               is_physically_impossible_sample(name, unit, *v));
             if (ts) {
                 if (first_metric_ts == 0 || ts < first_metric_ts) first_metric_ts = ts;
                 if (ts > last_metric_ts) last_metric_ts = ts;
@@ -339,6 +389,7 @@ int run_adapters_command(const std::filesystem::path& arg) {
         // Activity rates — the headline question for inference experiments
         std::printf("\n  activity (IGCL counters, derived as Δcounter / Δwall):\n");
         bool any_activity = false;
+        bool any_unusable_activity = false;
         for (const auto& key : {"gpu.activity.global_counter",
                                 "gpu.activity.render_compute_counter",
                                 "gpu.activity.media_counter"}) {
@@ -356,10 +407,14 @@ int run_adapters_command(const std::filesystem::path& arg) {
                         key, human_value(delta, s.unit).c_str(), dt_s);
             if (ns_unit) {
                 std::printf("%.1f%% activity", activity_ratio * 100.0);
-                if (delta < 0)               std::printf("  [BROKEN: counter regressed]");
-                else if (activity_ratio > 2) std::printf("  [BROKEN: counter advances %.0fx faster than wall clock]",
-                                                          activity_ratio);
-                else if (activity_ratio > 1) std::printf("  [warn: counter advances faster than wall clock]");
+                if (delta < 0) {
+                    std::printf("  [UNUSABLE: counter regressed; prefer slower non-IGCL signals]");
+                    any_unusable_activity = true;
+                } else if (activity_ratio > 1) {
+                    std::printf("  [UNUSABLE: counter advances %.0fx faster than wall clock; prefer slower non-IGCL signals]",
+                                activity_ratio);
+                    any_unusable_activity = true;
+                }
                 std::printf("\n");
             } else {
                 std::printf("%.4g/s\n", rate);
@@ -367,11 +422,16 @@ int run_adapters_command(const std::filesystem::path& arg) {
             any_activity = true;
         }
         if (!any_activity) std::printf("    (no IGCL activity counters or run too short for rate)\n");
+        if (any_unusable_activity) {
+            std::printf("    verdict: IGCL activity is source-degraded for this adapter; use PDH adapter memory, DXGI/Vulkan budget, D3DKMT thermals, and workload timestamps instead.\n");
+        }
 
         // Memory residency — first vs last, peak
-        std::printf("\n  memory residency (per-process; v1 doesn't attribute other PIDs):\n");
+        std::printf("\n  memory / workload evidence (trust order: PDH adapter memory > DXGI/Vulkan process budgets > IGCL):\n");
         bool any_mem = false;
-        for (const auto& key : {"vram.local.current_usage_bytes",
+        for (const auto& key : {"gpu.adapter.vram.local.bytes_committed",
+                                "gpu.adapter.vram.non_local.bytes_committed",
+                                "vram.local.current_usage_bytes",
                                 "vram.non_local.current_usage_bytes",
                                 "vulkan.heap0.usage_bytes",
                                 "vulkan.heap1.usage_bytes",
@@ -386,7 +446,10 @@ int run_adapters_command(const std::filesystem::path& arg) {
                         human_value(s.max,   s.unit).c_str(),
                         human_value(s.last,  s.unit).c_str(),
                         s.n,
-                        s.source.c_str());
+                        source_summary(s).c_str());
+            if (std::string(key).find("gpu.adapter.vram.") == 0) {
+                std::printf("      ^ system-wide adapter memory; usable as slow fallback when IGCL counters are broken\n");
+            }
             any_mem = true;
         }
         if (!any_mem) std::printf("    (no memory metrics in this run)\n");
@@ -406,7 +469,11 @@ int run_adapters_command(const std::filesystem::path& arg) {
                         human_value(s.max,  s.unit).c_str(),
                         human_value(s.mean(), s.unit).c_str(),
                         s.n,
-                        s.source.c_str());
+                        source_summary(s).c_str());
+            if (s.impossible_samples || s.untrusted_samples || s.low_confidence_samples) {
+                std::printf("      ^ degraded samples: impossible=%zu untrusted=%zu low_confidence=%zu; do not use as authoritative\n",
+                            s.impossible_samples, s.untrusted_samples, s.low_confidence_samples);
+            }
             any_phys = true;
         }
         if (!any_phys) std::printf("    (no thermal/clock/voltage metrics in this run)\n");
