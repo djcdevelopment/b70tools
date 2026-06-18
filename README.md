@@ -108,7 +108,7 @@ produce structured, interpretable telemetry without perturbing the system it mea
 | **CPU** | AMD Ryzen 9 5900X |
 | **RAM** | 32 GB DDR4 |
 | **OS** | Windows 10 Pro 10.0.19045 |
-| **Driver** | 32.0.101.8801 (Intel Arc, production) |
+| **Driver** | 32.0.101.8826 (Intel Arc, production; up from 8801 — see note below) |
 | **PCIe** | 4.0 ×8/×8 (cards are PCIe 5.0 capable; host limits to 4.0) |
 
 The two cards are physically different. The **top-slot card** (Vulkan1) is wedged between
@@ -394,7 +394,8 @@ only what b70tools can credibly report about it.
 | IGCL goes completely silent under concurrent Vulkan init | Top slot | Zero telemetry during contention; silence rule fires if it recurs |
 | D3DKMT `ADAPTERPERFDATA` returns INVALID_PARAMETER | Both | Expected on Win10 19045; flagged once per session |
 | Workload VRAM residency invisible | Both | DXGI/Vulkan budget are per-process; model weights are invisible to v1 |
-| Shared-GPU-memory spillover under near-VRAM-ceiling dual split | Either | Observed live (2026-06-16): 70B `-fit off -ts 1,1` overloaded one card past its 32 GB dedicated and spilled ~6 GB into host memory. b70tools' PDH per-adapter signal **caught it** (`non_local` committed ≈ Task Manager shared). The 48 GB-per-card (32 dedicated + 16 shared) mechanism, confirmed in a real workload. |
+| Shared-GPU-memory spillover under near-VRAM-ceiling dual split | Either | Observed live (2026-06-16): 70B `-fit off -ts 1,1` overloaded one card past its 32 GB dedicated and spilled ~6 GB into host memory. b70tools' PDH per-adapter signal **caught it** (`non_local` committed ≈ Task Manager shared). NB: each B70 is **32 GB physical VRAM**; Task Manager's "48 GB" is 32 GB dedicated + a ~16 GB window into the **32 GB host DDR4** (PCIe-slow, shared across both cards) — *not* 48 GB of card memory. Fast ceiling = 64 GB pooled (2×32). |
+| SYCL/Level-Zero VRAM invisible to PDH adapter-memory counter | Either | Observed 2026-06-18: under IPEX-LLM/SYCL inference, `\GPU Adapter Memory\Dedicated Usage` read ~1 GB while the runtime held 29 GB resident; the *same* counter reads Vulkan allocations cleanly (22.8 GB). Level-Zero allocates via its own UR path WDDM doesn't attribute the same way. **Do not trust the PDH dedicated counter to gate a SYCL workload.** New disagreement-rule candidate (`source_blind_to_allocation`). |
 | The real host wall is **commit charge, not free RAM** | Host | Under dual-card load, physical RAM stayed at 60% (~13.5 GB free) while commit hit **92%** of the limit (83.1 / 89.9 GB). At the commit ceiling, allocations fail regardless of free RAM. Implication: the `verdict` gate should watch `host.commit.available_bytes`, not free RAM. |
 
 The VRAM blindspot is the most operationally significant gap. v1.5's PDH `GPU Process
@@ -406,6 +407,15 @@ in [`docs/overnight-regression-plan-2026-06-16.md`](docs/overnight-regression-pl
 queued follow-ups in [`docs/inference-test-backlog.md`](docs/inference-test-backlog.md),
 retrospective in
 [`docs/retrospective-wow-realtime-inference-impact-overnight-2026-06-16.md`](docs/retrospective-wow-realtime-inference-impact-overnight-2026-06-16.md).
+
+**Driver fix + the SYCL decode unlock (2026-06-18):** the load-test BSOD (a reproducible
+`0xD1` in `igfxnd` on a desktop/mode-switch-under-load path) is **fixed by driver `8801` -> `8826`**,
+verified under exact original crash conditions. Separately, long-context decode on Vulkan was
+root-caused to the attention kernel (not config/memory — ruled out by the new
+[`eval/scripts/bench-config.ps1`](eval/scripts/bench-config.ps1) micro-bench + a live PDH probe),
+and **IPEX-LLM/SYCL decodes 3.5x faster at 25k context** (14.5 vs 4.2 t/s, same 32B). Decision
+rule: long context -> SYCL, short context -> Vulkan. Full write-up:
+[`docs/retrospective-bsod-fix-and-sycl-unlock-2026-06-18.md`](docs/retrospective-bsod-fix-and-sycl-unlock-2026-06-18.md).
 
 ---
 

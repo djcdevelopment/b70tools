@@ -80,10 +80,12 @@ while commit was at the 92% edge — the actual allocation-failure risk. **Add a
 floor to the verdict gate** (host.commit.available_bytes) so it catches the real ceiling. Pairs
 with [[b70tools-verdict-gate]]. Small, high-value collector/gate change.
 
-## 4. COOPMAT toggle (low priority now — driver exonerated)
-**Question:** does `GGML_VK_DISABLE_COOPMAT=0` change prefill/decode on this driver?
-**How:** one model, A/B the env var (launcher currently forces `=1`). Quick knob check, no longer
-a suspected-regression investigation.
+## 4. COOPMAT toggle — RESOLVED 2026-06-18: no-op
+A/B'd via `eval/scripts/bench-config.ps1` on the new driver (`8826`), Qwen2.5-32B-Q4, 25k ctx:
+`GGML_VK_DISABLE_COOPMAT` 1 vs 0 gave **identical** prefill (243 vs 241) and decode (4.17 vs
+4.17). Toggle is effectively inert on this build/driver (no coopmat probe line in the startup
+log either). Closed — the long-context decode bottleneck is the Vulkan attention kernel, not a
+missing matrix path (see #8 and the 2026-06-18 retro).
 
 ## 5. Cache work — the real fixes (code, not just runs)
 - **Tempo `ParseResult` disk cache** keyed by source SHA (`Sha256 = null // deferred` today).
@@ -104,3 +106,41 @@ a suspected-regression investigation.
 - Full per-model throughput table tonight vs 20260605 (label it "busy-box" — see golden rule).
 - Confirm the MoE decode tiebreaker: did MoE hold decode better than mistral under the same host
   load? (Supports the bandwidth/contention story + the MoE-for-tooling pick.)
+
+---
+
+## 8. SYCL is the long-context decode path — 3.5x over Vulkan (2026-06-18)  ⭐⭐ highest value
+**Found:** long-context decode on Vulkan is **attention-kernel-bound**, not config/memory.
+Ruled out via `eval/scripts/bench-config.ps1` (Qwen2.5-32B-Q4, 25k ctx): coopmat, single-vs-dual
+card, q8-vs-f16 KV, host contention — all left decode pinned at ~4.2 t/s; a live PDH probe
+disproved the shared-memory-spill theory (clean card: 22.78 GB dedicated / 0.49 shared, no spill,
+still 4.2). Tiny-ctx decode was 21.5 t/s — a 5x collapse purely from context depth = the
+attention kernel. **Then:** the IPEX-LLM SYCL stack already on the box
+(`D:\work\battlemage\intel_ollama\tools\ipex-llm-ollama\`, `ipex-llm-2.3.0b20250630`) ran the
+SAME model/quant/prompt at **14.47 t/s decode (3.5x), confirmed n=4 <1% variance, coherent
+output.** Cold load is 12x slower (131s vs 11s) — irrelevant for hot/`keep_alive` models.
+**Decision rule:** long context (Hermes-125k, coding+repo) -> SYCL; short context / fast
+cold-load -> Vulkan. Full write-up in the 2026-06-18 retro.
+
+### Follow-ups (ordered)
+- **8a (⭐):** SYCL decode at the REAL depth — load Hermes (or any 125k-capable model) under
+  IPEX-LLM and measure decode at 125k. The 25k result is a proxy until measured on the model.
+- **8b:** dual-card SYCL — can ipex-llm-ollama tensor-split across both B70s, and does it help or
+  just cost? (tonight was single-card; Vulkan layer-split cost prefill, not decode.)
+- **8c:** planner/critic two-lane, measured — pin a 2nd SYCL model to `ONEAPI_DEVICE_SELECTOR=
+  level_zero:1` and confirm each lane holds ~14.5 t/s under simultaneous load. The operator's
+  pattern, end-to-end. Model+KV fits one 32 GB card, so two independent lanes is the rig optimum.
+- **8d (GATED — hazard):** does SYCL/Level-Zero overflow into host RAM, or hard-stop at VRAM?
+  Determines the real per-card model-size ceiling. **Run ONLY with the verdict host-floor
+  guardrail** — deliberate max-VRAM is the documented cascade->non-POST hazard. ollama plans
+  conservatively (partial-offloads rather than OOM), which keeps it on the safe side; read its
+  offload-decision log (memory.available / required / layers.offload) at rising context.
+- **8e (b70tools code):** SYCL/Level-Zero VRAM is ~invisible to the PDH `GPU Adapter Memory\
+  Dedicated Usage` counter (showed 1 GB while ollama held 29 GB; same counter read Vulkan at
+  22.8 GB). A new cross-observer disagreement class — add a `source_blind_to_allocation` style
+  rule so the verdict gate is never trusted on a SYCL workload. Pairs with [[cross-process-vram-signal]].
+
+### Capacity note (operator-corrected 2026-06-18)
+Each B70 is **32 GB physical VRAM, period** — 64 GB pooled across the two for fast work. The
+Task-Manager "48 GB per card" is 32 GB VRAM + a ~16 GB window into the **32 GB host DDR4**
+(PCIe-slow, shared across both cards + OS). Do NOT plan capacity off "48/card."

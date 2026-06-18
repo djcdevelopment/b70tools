@@ -382,3 +382,20 @@ required. New rig findings: shared-GPU-memory spillover observed live on the 70B
 signal caught the 6 GB spill); the real host wall is **commit charge, not free RAM** (92% commit
 vs 60% physical) → verdict-gate should watch commit headroom. MoE chosen as the single-card
 always-hot local-tooling backend.
+
+## Round 3 — driver fix verified + SYCL decode unlock (2026-06-18)
+
+Investigation session. Retrospective:
+`docs/retrospective-bsod-fix-and-sycl-unlock-2026-06-18.md`; follow-ups appended to
+`docs/inference-test-backlog.md` (#8); new harness `eval/scripts/bench-config.ps1`.
+
+Headlines: the load-test BSOD (`0xD1` in `igfxnd`, desktop/mode-switch-under-load) is **fixed
+by driver `8801` → `8826`**, verified under exact original crash conditions (overlay + dual-card
+load, both `Win+Shift+S` and `Ctrl+Alt+Del`, no crash); the `hud.exe` overlay is exonerated.
+Long-context decode on Vulkan root-caused to the **attention kernel** — coopmat, card count, KV
+format, contention, and the shared-memory-spill theory all ruled out (the last by a live PDH
+probe: clean card 22.78 GB dedicated / 0.49 shared, no spill, still 4.2 t/s). **IPEX-LLM/SYCL
+decodes 3.5× faster at 25k** (14.47 vs 4.17 t/s, same 32B, n=4 <1% variance), using the
+ipex-llm-ollama stack already on the box. Decision rule: **long context → SYCL, short → Vulkan**;
+planner/critic one-model-per-card (each fits one 32 GB card) is the measured rig optimum.
+Capacity correction: each B70 is 32 GB VRAM (64 GB pooled), not "48/card."
